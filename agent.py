@@ -69,36 +69,89 @@ class LangGraphAgent:
         """调用模型生成回复"""
         messages = state["messages"]
         
-        # 获取最后一条用户消息
-        last_message = messages[-1]
-        if isinstance(last_message, HumanMessage):
-            prompt = last_message.content
-        else:
-            prompt = str(last_message.content)
+        # 转换为 chat template 格式
+        chat_messages = []
+        for msg in messages:
+            if isinstance(msg, HumanMessage):
+                chat_messages.append({"role": "user", "content": msg.content})
+            elif isinstance(msg, AIMessage):
+                chat_messages.append({"role": "assistant", "content": msg.content})
         
-        # 构建对话历史
-        conversation_history = self._build_conversation_history(messages)
-        
-        # 调用模型
+        # 调用模型（传入消息列表，让模型使用 chat template）
         response = self.llm.invoke(
-            conversation_history,
+            chat_messages,
             temperature=TEMPERATURE,
             max_length=MAX_TOKENS
         )
         
+        # 清理响应：移除可能的重复格式
+        response = self._clean_response(response)
+        
         # 返回 AI 消息
         return {"messages": [AIMessage(content=response)]}
     
-    def _build_conversation_history(self, messages: Sequence[BaseMessage]) -> str:
-        """构建对话历史字符串"""
-        history = []
-        for msg in messages:
-            if isinstance(msg, HumanMessage):
-                history.append(f"用户: {msg.content}")
-            elif isinstance(msg, AIMessage):
-                history.append(f"助手: {msg.content}")
+    def _clean_response(self, response: str) -> str:
+        """清理响应，移除自我问答格式"""
+        if not response:
+            return ""
         
-        return "\n".join(history) + "\n助手: "
+        # 移除可能的"用户:"和"助手:"标记
+        lines = response.split('\n')
+        cleaned_lines = []
+        found_stop_marker = False
+        
+        for line in lines:
+            line_stripped = line.strip()
+            # 如果遇到"用户:"或"助手:"标记，停止（但保留当前行之前的内容）
+            if line_stripped.startswith('用户:') or line_stripped.startswith('助手:'):
+                found_stop_marker = True
+                break
+            if line_stripped.startswith('User:') or line_stripped.startswith('Assistant:'):
+                found_stop_marker = True
+                break
+            # 检查是否包含对话格式（可能是模型开始自我问答）
+            if '用户:' in line or '助手:' in line:
+                # 如果这一行包含对话标记，只保留标记之前的内容
+                for marker in ['用户:', '助手:', 'User:', 'Assistant:']:
+                    if marker in line:
+                        line = line.split(marker)[0]
+                        found_stop_marker = True
+                        break
+                if found_stop_marker:
+                    break
+            cleaned_lines.append(line)
+        
+        result = '\n'.join(cleaned_lines).strip()
+        
+        # 移除末尾的重复结束语（如果文本较长且包含结束语）
+        if len(result) > 100:  # 只对较长的文本进行清理
+            end_phrases = [
+                "希望这篇文章能给您带来一定的启发，也希望您能从中得到启示",
+                "希望这篇文章能给您带来一定的启发",
+                "如果有任何问题或需要进一步的帮助，请随时与我联系",
+                "祝您学习愉快！",
+            ]
+            
+            for phrase in end_phrases:
+                if phrase in result:
+                    # 找到所有出现位置
+                    occurrences = []
+                    start = 0
+                    while True:
+                        idx = result.find(phrase, start)
+                        if idx == -1:
+                            break
+                        occurrences.append(idx)
+                        start = idx + 1
+                    
+                    # 如果结束语出现多次，且最后一次在文本的后半部分，截断
+                    if len(occurrences) > 1:
+                        last_idx = occurrences[-1]
+                        if last_idx > len(result) * 0.4:  # 在文本的后40%部分
+                            result = result[:last_idx].strip()
+                            break
+        
+        return result
     
     def _call_tools(self, state: AgentState):
         """调用工具（当前版本暂不使用工具）"""
